@@ -51,28 +51,45 @@ struct Patcher {
         let archs = try getArchitectures(atUrl: url)
         if archs.count == 0 {
             try FileManager.default.copyItem(at: url, to: extractionUrl.appendingPathComponent("lib.arm64"))
-        } else{
+        } else {
             try archs.forEach { arch in
                 try extract(inputFileAtUrl: url, withArch: arch, toURL: extractionUrl)
             }
         }
+        
+        // Use ArArchive to properly handle duplicate members
+        let arm64LibUrl = extractionUrl.appendingPathComponent("lib.arm64")
+        try processStaticLibrary(at: arm64LibUrl, minos: minos, sdk: sdk)
+        
         FileManager.default.changeCurrentDirectoryPath(extractionUrl.path)
-        try shellOut(to: "ar", arguments: ["x", extractionUrl.appendingPathComponent("lib.arm64").path])
-        if let emulator = FileManager.default.enumerator(atPath: extractionUrl.path) {
-            for file in emulator {
-                if let fileString = file as? String {
-                    if fileString.hasSuffix(".o") {
-                        Transmogrifier.processBinary(atPath: extractionUrl.appendingPathComponent(fileString).path, minos: minos, sdk: sdk)
-                    }
-                }
-            }
-        }
-        try FileManager.default.removeItem(at: extractionUrl.appendingPathComponent("lib.arm64"))
-        try shellOut(to: "ar", arguments: ["cr", "lib.arm64", "*.o"])
         try shellOut(to: "lipo", arguments: ["-create", "-output", url.lastPathComponent, "lib.*"])
         try FileManager.default.moveItem(at: url, to: url.appendingPathExtension(ORIGINAL_EXTENSION))
         try FileManager.default.moveItem(at: extractionUrl.appendingPathComponent(url.lastPathComponent), to: patchedUrl)
         try link(url, withDestinationUrl: patchedUrl)
+    }
+    
+    /// Process static library using ArArchive to preserve duplicate members
+    private static func processStaticLibrary(at url: URL, minos: UInt32, sdk: UInt32) throws {
+        // Parse the archive, preserving all members including duplicates
+        var members = try ArArchive.parse(url: url)
+        
+        // Process each .o member in memory
+        for i in 0..<members.count {
+            guard members[i].name.hasSuffix(".o") else { continue }
+            
+            do {
+                members[i].data = try Transmogrifier.processData(members[i].data, minos: minos, sdk: sdk)
+            } catch {
+                // Skip files that can't be processed (e.g., already processed)
+                continue
+            }
+        }
+        
+        // Write back the archive with all members preserved
+        try ArArchive.write(members: members, to: url)
+        
+        // Regenerate symbol table
+        _ = try? shellOut(to: "ranlib", arguments: [url.path])
     }
     
     private static func link(_ url: URL, withDestinationUrl destUrl: URL) throws {

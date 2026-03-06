@@ -5,7 +5,7 @@ struct Arm64ToSim: ParsableCommand {
     
     static var configuration = CommandConfiguration(
         abstract: "A simple command-line tool for hacking native ARM64 binaries to run on the Apple Silicon iOS Simulator.",
-        version: "1.0.0",
+        version: "1.1.0",
         subcommands: [Patch.self, Restore.self]
     )
     

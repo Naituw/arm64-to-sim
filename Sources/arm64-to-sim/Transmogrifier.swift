@@ -204,4 +204,100 @@ struct Transmogrifier {
         // save back to disk
         try! reworkedData.write(to: URL(fileURLWithPath: path))
     }
+    
+    /// Process Mach-O binary data in memory and return modified data
+    public static func processData(_ data: Data, minos: UInt32 = 13, sdk: UInt32 = 13) throws -> Data {
+        let (headerData, loadCommandsData, programData) = try readBinaryData(data)
+        
+        let editor = try computeLoadCommandsEditorThrowing(loadCommandsData)
+        
+        let editedCommandsData = loadCommandsData
+            .map { return editor($0, minos, sdk) }
+            .merge()
+        
+        var header: mach_header_64 = headerData.asStruct()
+        header.sizeofcmds = UInt32(editedCommandsData.count)
+        
+        let reworkedData = [
+            Data(bytes: &header, count: MemoryLayout<mach_header_64>.stride),
+            editedCommandsData,
+            programData
+        ].merge()
+        
+        return reworkedData
+    }
+    
+    private static func readBinaryData(_ data: Data) throws -> (Data, [Data], Data) {
+        var offset = 0
+        let headerSize = MemoryLayout<mach_header_64>.stride
+        
+        guard data.count >= headerSize else {
+            throw TransmogrifierError.invalidMachO("File too small for Mach-O header")
+        }
+        
+        let headerData = Data(data[offset..<(offset + headerSize)])
+        let header: mach_header_64 = headerData.asStruct()
+        
+        if header.magic != MH_MAGIC_64 || header.cputype != CPU_TYPE_ARM64 {
+            throw TransmogrifierError.invalidMachO("Not a valid arm64 Mach-O binary")
+        }
+        
+        offset += headerSize
+        
+        var loadCommandsData: [Data] = []
+        for _ in 0..<header.ncmds {
+            let lcHeaderSize = MemoryLayout<load_command>.stride
+            guard offset + lcHeaderSize <= data.count else {
+                throw TransmogrifierError.invalidMachO("Truncated load command")
+            }
+            
+            let lc: load_command = Data(data[offset..<(offset + lcHeaderSize)]).asStruct()
+            let cmdSize = Int(lc.cmdsize)
+            
+            guard offset + cmdSize <= data.count else {
+                throw TransmogrifierError.invalidMachO("Load command extends beyond file")
+            }
+            
+            loadCommandsData.append(Data(data[offset..<(offset + cmdSize)]))
+            offset += cmdSize
+        }
+        
+        let programData = Data(data[offset...])
+        
+        return (headerData, loadCommandsData, programData)
+    }
+    
+    private static func computeLoadCommandsEditorThrowing(_ loadCommandsData: [Data]) throws -> ((Data, UInt32, UInt32) -> Data) {
+        var contains_LC_VERSION_MIN_IPHONEOS = false
+        var contains_LC_BUILD_VERSION = false
+        
+        for lc in loadCommandsData {
+            let loadCommand = UInt32(lc.loadCommand)
+            if loadCommand == LC_VERSION_MIN_IPHONEOS {
+                contains_LC_VERSION_MIN_IPHONEOS = true
+            } else if loadCommand == LC_BUILD_VERSION {
+                contains_LC_BUILD_VERSION = true
+            }
+        }
+        
+        if contains_LC_VERSION_MIN_IPHONEOS == contains_LC_BUILD_VERSION {
+            if contains_LC_BUILD_VERSION {
+                throw TransmogrifierError.invalidMachO("Both LC_VERSION_MIN_IPHONEOS and LC_BUILD_VERSION present")
+            } else {
+                throw TransmogrifierError.invalidMachO("Neither LC_VERSION_MIN_IPHONEOS nor LC_BUILD_VERSION present")
+            }
+        }
+        
+        return contains_LC_VERSION_MIN_IPHONEOS ? updatePreiOS12ObjectFile : updatePostiOS12ObjectFile
+    }
+}
+
+enum TransmogrifierError: Error, CustomStringConvertible {
+    case invalidMachO(String)
+    
+    var description: String {
+        switch self {
+        case .invalidMachO(let msg): return "Invalid Mach-O: \(msg)"
+        }
+    }
 }

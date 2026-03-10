@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:arm64-to-sim}",
+            "name": "Debug arm64-to-sim",
+            "target": "arm64-to-sim",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug arm64-to-sim"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:arm64-to-sim}",
+            "name": "Release arm64-to-sim",
+            "target": "arm64-to-sim",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release arm64-to-sim"
+        }
+    ]
+}

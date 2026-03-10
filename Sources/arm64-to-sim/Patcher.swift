@@ -106,4 +106,50 @@ struct Patcher {
         let url = URL(fileURLWithPath: path).absoluteURL
         try link(url, withDestinationUrl: url.appendingPathExtension(ORIGINAL_EXTENSION))
     }
+    
+    /// Revert a patched simulator arm64 static library back to device arm64
+    static func revert(atPath path: String, minos: UInt32, sdk: UInt32) throws {
+        let url = URL(fileURLWithPath: path).absoluteURL
+        let revertedUrl = url.appendingPathExtension("reverted")
+        if FileManager.default.fileExists(atPath: revertedUrl.path) {
+            try link(url, withDestinationUrl: revertedUrl)
+            return
+        }
+        
+        let extractionUrl = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: extractionUrl, withIntermediateDirectories: true, attributes: nil)
+        let archs = try getArchitectures(atUrl: url)
+        if archs.count == 0 {
+            try FileManager.default.copyItem(at: url, to: extractionUrl.appendingPathComponent("lib.arm64"))
+        } else {
+            try archs.forEach { arch in
+                try extract(inputFileAtUrl: url, withArch: arch, toURL: extractionUrl)
+            }
+        }
+        
+        let arm64LibUrl = extractionUrl.appendingPathComponent("lib.arm64")
+        try revertStaticLibrary(at: arm64LibUrl, minos: minos, sdk: sdk)
+        
+        FileManager.default.changeCurrentDirectoryPath(extractionUrl.path)
+        try shellOut(to: "lipo", arguments: ["-create", "-output", url.lastPathComponent, "lib.*"])
+        try FileManager.default.moveItem(at: url, to: url.appendingPathExtension("sim"))
+        try FileManager.default.moveItem(at: extractionUrl.appendingPathComponent(url.lastPathComponent), to: revertedUrl)
+        try link(url, withDestinationUrl: revertedUrl)
+    }
+    
+    private static func revertStaticLibrary(at url: URL, minos: UInt32, sdk: UInt32) throws {
+        var members = try ArArchive.parse(url: url)
+        
+        for i in 0..<members.count {
+            guard members[i].name.hasSuffix(".o") else { continue }
+            do {
+                members[i].data = try Transmogrifier.revertData(members[i].data, minos: minos, sdk: sdk)
+            } catch {
+                continue
+            }
+        }
+        
+        try ArArchive.write(members: members, to: url)
+        _ = try? shellOut(to: "ranlib", arguments: [url.path])
+    }
 }

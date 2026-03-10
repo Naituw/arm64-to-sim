@@ -77,15 +77,26 @@ struct Transmogrifier {
         return datas.merge()
     }
     
-    private static func updateVersionMin(_ data: Data, _ offset: UInt32, minos: UInt32, sdk: UInt32) -> Data {
+    private static func updateVersionMin(_ data: Data, _ offset: UInt32, minos: UInt32, sdk: UInt32, platform: UInt32 = UInt32(PLATFORM_IOSSIMULATOR)) -> Data {
         var command = build_version_command(cmd: UInt32(LC_BUILD_VERSION),
                                             cmdsize: UInt32(MemoryLayout<build_version_command>.stride),
-                                            platform: UInt32(PLATFORM_IOSSIMULATOR),
+                                            platform: platform,
                                             minos: minos << 16 | 0 << 8 | 0,
                                             sdk: sdk << 16 | 0 << 8 | 0,
                                             ntools: 0)
         
         return Data(bytes: &command, count: MemoryLayout<build_version_command>.stride)
+    }
+    
+    private static func revertVersionMin(_ data: Data, minos: UInt32, sdk: UInt32) -> Data {
+        // Read existing minos/sdk from the LC_BUILD_VERSION command if caller passes 0
+        var existing: build_version_command = data.asStruct()
+        let resolvedMinos = minos > 0 ? (minos << 16) : existing.minos
+        let resolvedSdk  = sdk  > 0 ? (sdk  << 16) : existing.sdk
+        existing.platform = UInt32(PLATFORM_IOS)
+        existing.minos = resolvedMinos
+        existing.sdk   = resolvedSdk
+        return Data(bytes: &existing, count: MemoryLayout<build_version_command>.stride)
     }
     
     private static func updateDataInCode(_ data: Data, _ offset: UInt32) -> Data {
@@ -289,6 +300,51 @@ struct Transmogrifier {
         }
         
         return contains_LC_VERSION_MIN_IPHONEOS ? updatePreiOS12ObjectFile : updatePostiOS12ObjectFile
+    }
+    
+    private static func computeRevertEditorThrowing(_ loadCommandsData: [Data]) throws -> ((Data, UInt32, UInt32) -> Data) {
+        for lc in loadCommandsData {
+            if UInt32(lc.loadCommand) == LC_BUILD_VERSION {
+                let cmd: build_version_command = lc.asStruct()
+                guard cmd.platform == UInt32(PLATFORM_IOSSIMULATOR) else {
+                    throw TransmogrifierError.invalidMachO("LC_BUILD_VERSION platform is not iOSSimulator, cannot revert")
+                }
+                return revertPostiOS12ObjectFile
+            }
+        }
+        throw TransmogrifierError.invalidMachO("No LC_BUILD_VERSION found; cannot revert")
+    }
+    
+    static func revertPostiOS12ObjectFile(lc: Data, minos: UInt32, sdk: UInt32) -> Data {
+        let cmd = Int32(bitPattern: lc.loadCommand)
+        switch cmd {
+        case LC_BUILD_VERSION:
+            return revertVersionMin(lc, minos: minos, sdk: sdk)
+        default:
+            return lc
+        }
+    }
+    
+    /// Revert simulator arm64 .o data back to device arm64 by changing platform to iOS
+    public static func revertData(_ data: Data, minos: UInt32 = 0, sdk: UInt32 = 0) throws -> Data {
+        let (headerData, loadCommandsData, programData) = try readBinaryData(data)
+        
+        let editor = try computeRevertEditorThrowing(loadCommandsData)
+        
+        let editedCommandsData = loadCommandsData
+            .map { return editor($0, minos, sdk) }
+            .merge()
+        
+        var header: mach_header_64 = headerData.asStruct()
+        header.sizeofcmds = UInt32(editedCommandsData.count)
+        
+        let reworkedData = [
+            Data(bytes: &header, count: MemoryLayout<mach_header_64>.stride),
+            editedCommandsData,
+            programData
+        ].merge()
+        
+        return reworkedData
     }
 }
 
